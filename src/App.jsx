@@ -21,7 +21,6 @@ I must confess the date strikes me as most peculiar, but then the older one gets
 
 Pray — what shall we talk about? I find that the best dinner conversations begin with a bold question.`;
 
-const EL_KEY    = "sk_0a21fb30b487b7cb7f76d55bf6dc781c6a2c29d8c74f110a";
 const VOICE_ID  = "JBFqnCBsd6RMkjVDRZzb";
 const SIMLI_KEY = "mjd588b2wc94l1bxmpqhh7";
 const FACE_ID   = "fbd6098b-e350-4efa-aa9f-c8222e0d5108";
@@ -143,16 +142,12 @@ export default function App() {
     try {
       setSpeaking(true);
       setLog("Generating speech...");
-      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
+      const res = await fetch("/api/tts", {
         method: "POST",
-        headers: { "xi-api-key": EL_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: text.slice(0, 900),
-          model_id: "eleven_monolingual_v1",
-          voice_settings: { stability: 0.65, similarity_boost: 0.80, style: 0.3 },
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text.slice(0, 900), voice_id: VOICE_ID }),
       });
-      if (!res.ok) throw new Error("ElevenLabs " + res.status);
+      if (!res.ok) throw new Error("TTS " + res.status);
       const blob = await res.blob();
 
       if (clientRef.current && simliReady) {
