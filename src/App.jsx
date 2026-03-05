@@ -238,9 +238,10 @@ export default function App() {
     };
     recognition.onend = () => setListening(false);
     recognition.onerror = (e) => {
-      console.error("Speech recognition error:", e.error);
       setListening(false);
       if (e.error === "not-allowed") setLog("Microphone access denied");
+      else if (e.error === "no-speech") setLog("No speech detected — try again");
+      else console.error("Speech recognition error:", e.error);
     };
     recognitionRef.current = recognition;
     recognition.start();
@@ -266,7 +267,7 @@ export default function App() {
         .frame.glow::before{animation:fg 1.7s ease-in-out infinite}
         @keyframes fg{0%,100%{box-shadow:inset 0 0 0 2px rgba(180,140,50,.4),0 0 0 1px rgba(180,140,50,.22),0 4px 18px rgba(0,0,0,.5),0 0 50px rgba(180,120,20,.24)}50%{box-shadow:inset 0 0 0 2px rgba(205,165,65,.6),0 0 0 1px rgba(205,165,65,.38),0 4px 18px rgba(0,0,0,.5),0 0 70px rgba(200,140,28,.38)}}
         .portrait{width:100%;height:100%;object-fit:cover;object-position:center top;filter:sepia(14%) contrast(1.04) brightness(.92)}
-        .simli-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:3;background:#0b0806}
+        .simli-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:3;background:transparent}
         .ph{width:100%;height:100%;background:linear-gradient(155deg,#231808,#140b05);display:flex;align-items:center;justify-content:center;font-family:'Playfair Display',serif;font-size:4rem;color:rgba(160,110,38,.32)}
         .mouth{position:absolute;bottom:21%;left:50%;transform:translateX(-50%);width:30px;z-index:4;opacity:0;pointer-events:none;transition:opacity .2s}
         .frame.glow:not(.vid-on) .mouth{opacity:1}
@@ -355,21 +356,18 @@ export default function App() {
         {/* ── AVATAR ── */}
         <div className="left">
           <div className={`frame ${speaking ? "glow" : ""} ${videoActive ? "vid-on" : ""}`}>
-            {simliError
-              ? (imgErr
-                  ? <div className="ph">WSC</div>
-                  : <img
-                      className="portrait"
-                      src={IMG}
-                      alt="Churchill"
-                      crossOrigin="anonymous"
-                      onError={() => setImgErr(true)}
-                    />)
-              : null}
+            {imgErr
+              ? <div className="ph">WSC</div>
+              : <img
+                  className="portrait"
+                  src={IMG}
+                  alt="Churchill"
+                  crossOrigin="anonymous"
+                  onError={() => setImgErr(true)}
+                />}
             <video
               ref={videoEl}
               className="simli-video"
-              style={{ display: simliError ? "none" : "block" }}
               autoPlay
               playsInline
             />
