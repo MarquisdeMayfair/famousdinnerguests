@@ -151,30 +151,31 @@ export default function App() {
       });
       if (!res.ok) throw new Error("TTS " + res.status);
       const blob = await res.blob();
+      const arrayBuf = await blob.arrayBuffer();
 
-      // Always play audio through speakers
-      const url = URL.createObjectURL(blob);
-      audioEl.current.src = url;
-      audioEl.current.onended = () => {
+      // Decode to AudioContext and play directly (bypasses autoplay restrictions)
+      const actx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuf = await actx.decodeAudioData(arrayBuf.slice(0));
+      const source = actx.createBufferSource();
+      source.buffer = audioBuf;
+      source.connect(actx.destination);
+      source.onended = () => {
         setSpeaking(false);
         setVideoActive(false);
         setLog(simliReady ? "Lip sync ready ✓" : "Ready");
-        URL.revokeObjectURL(url);
+        actx.close();
       };
-      audioEl.current.onerror = () => { setSpeaking(false); setVideoActive(false); setLog("Audio error"); };
-      await audioEl.current.play();
+      source.start(0);
+      setLog(simliReady ? "Lip sync active..." : "Speaking...");
 
       // Also send to Simli for lip sync if connected
       if (clientRef.current && simliReady) {
-        setLog("Lip sync active...");
         setVideoActive(true);
-        const pcm16 = await blobToPCM16(blob);
+        const pcm16 = await blobToPCM16(new Blob([arrayBuf]));
         const CHUNK = 6000;
         for (let i = 0; i < pcm16.length; i += CHUNK) {
           clientRef.current.sendAudioData(pcm16.slice(i, i + CHUNK));
         }
-      } else {
-        setLog("Speaking...");
       }
     } catch (err) {
       console.error("Speak error:", err);
@@ -223,10 +224,10 @@ export default function App() {
 
   useEffect(() => { autoSendRef.current = sendText; }, [sendText]);
 
-  const toggleMic = useCallback(() => {
+  const toggleMic = useCallback(async () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setLog("Speech recognition not supported in this browser");
+      setLog("Speech recognition not supported — use Chrome");
       return;
     }
     if (listening) {
@@ -234,15 +235,22 @@ export default function App() {
       setListening(false);
       return;
     }
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setLog("Microphone access denied");
+      return;
+    }
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.lang = "en-GB";
     recognition.onresult = (event) => {
-      const transcript = event.results[0]?.[0]?.transcript;
+      const result = event.results[event.results.length - 1];
+      const transcript = result[0]?.transcript;
       if (transcript) {
         setInput(transcript);
-        pendingTranscriptRef.current = transcript;
+        if (result.isFinal) pendingTranscriptRef.current = transcript;
       }
     };
     recognition.onend = () => {
@@ -250,18 +258,18 @@ export default function App() {
       if (pendingTranscriptRef.current) {
         const txt = pendingTranscriptRef.current;
         pendingTranscriptRef.current = null;
-        setTimeout(() => autoSendRef.current?.(txt), 50);
+        setTimeout(() => autoSendRef.current?.(txt), 100);
       }
     };
     recognition.onerror = (e) => {
       setListening(false);
       if (e.error === "not-allowed") setLog("Microphone access denied");
       else if (e.error === "no-speech") setLog("No speech detected — try again");
-      else console.error("Speech recognition error:", e.error);
     };
     recognitionRef.current = recognition;
     recognition.start();
     setListening(true);
+    setLog("Listening...");
   }, [listening]);
 
   const statusDot = thinking ? "thinking" : speaking ? "speaking" : listening ? "speaking" : simliError ? "err" : "idle";
