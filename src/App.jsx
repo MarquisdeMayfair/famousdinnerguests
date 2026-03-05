@@ -58,6 +58,7 @@ export default function App() {
   const [simliReady, setSimliReady] = useState(false);
   const [simliError, setSimliError] = useState(false);
   const [videoActive, setVideoActive] = useState(false);
+  const [listening, setListening] = useState(false);
 
   const audioEl    = useRef(null);
   const simliAudio = useRef(null);
@@ -66,6 +67,7 @@ export default function App() {
   const waveInt    = useRef(null);
   const idRef      = useRef(1);
   const clientRef  = useRef(null);
+  const recognitionRef = useRef(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
 
@@ -220,8 +222,38 @@ export default function App() {
     }
   }, [input, msgs, thinking, speak]);
 
-  const statusDot = thinking ? "thinking" : speaking ? "speaking" : simliError ? "err" : "idle";
-  const statusTxt = thinking ? "Composing reply..." : speaking
+  const toggleMic = useCallback(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setLog("Speech recognition not supported in this browser");
+      return;
+    }
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = "en-GB";
+    recognition.onresult = (event) => {
+      const transcript = event.results[0]?.[0]?.transcript;
+      if (transcript) setInput(transcript);
+    };
+    recognition.onend = () => setListening(false);
+    recognition.onerror = (e) => {
+      console.error("Speech recognition error:", e.error);
+      setListening(false);
+      if (e.error === "not-allowed") setLog("Microphone access denied");
+    };
+    recognitionRef.current = recognition;
+    recognition.start();
+    setListening(true);
+  }, [listening]);
+
+  const statusDot = thinking ? "thinking" : speaking ? "speaking" : listening ? "speaking" : simliError ? "err" : "idle";
+  const statusTxt = listening ? "Listening..." : thinking ? "Composing reply..." : speaking
     ? (videoActive ? "Speaking · Lip sync active" : "Speaking...")
     : simliError ? "Voice only mode" : simliReady ? "At Table · Lip sync ready" : "Connecting...";
 
@@ -286,6 +318,11 @@ export default function App() {
         .send{background:linear-gradient(135deg,#745514,#a88228);border:none;border-radius:2px;color:#140b05;font-family:'Playfair Display',serif;font-size:.72rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;padding:.6rem .95rem;cursor:pointer;transition:all .15s;min-width:66px;height:42px}
         .send:hover:not(:disabled){background:linear-gradient(135deg,#886218,#bc9234);transform:translateY(-1px)}
         .send:disabled{opacity:.32;cursor:not-allowed;transform:none}
+        .mic{background:rgba(160,110,38,.08);border:1px solid rgba(160,110,38,.2);border-radius:2px;color:rgba(176,144,46,.6);font-size:1.1rem;cursor:pointer;width:42px;height:42px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
+        .mic:hover:not(:disabled){background:rgba(160,110,38,.16);border-color:rgba(160,110,38,.38);color:#c09030}
+        .mic.on{background:rgba(200,50,50,.15);border-color:rgba(200,50,50,.4);color:#e05040;animation:micpulse 1s ease-in-out infinite}
+        .mic:disabled{opacity:.32;cursor:not-allowed}
+        @keyframes micpulse{0%,100%{box-shadow:0 0 0 0 rgba(200,50,50,.3)}50%{box-shadow:0 0 0 6px rgba(200,50,50,0)}}
         .msgs::-webkit-scrollbar{width:3px}.msgs::-webkit-scrollbar-thumb{background:rgba(160,110,38,.12);border-radius:2px}
         .ov{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:50;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
         .modal{background:#100d07;border:1px solid rgba(160,110,38,.22);border-radius:3px;width:480px;max-width:92vw;max-height:86vh;overflow-y:auto;box-shadow:0 18px 50px rgba(0,0,0,.9)}
@@ -335,7 +372,8 @@ export default function App() {
             <video
               ref={videoEl}
               className="simli-video"
-              style={{ display: videoActive ? "block" : "none" }}
+              style={{ display: simliReady ? "block" : "none" }}
+              autoPlay
               playsInline
             />
             <div className="mouth"><div className="mb" /></div>
@@ -393,6 +431,14 @@ export default function App() {
           </div>
 
           <div className="ia">
+            <button
+              className={`mic ${listening ? "on" : ""}`}
+              onClick={toggleMic}
+              disabled={thinking || speaking}
+              title={listening ? "Stop listening" : "Speak to Churchill"}
+            >
+              {listening ? "⏹" : "🎤"}
+            </button>
             <textarea
               rows={1}
               placeholder="Ask Churchill anything — the war, cigars, Britain, history..."
