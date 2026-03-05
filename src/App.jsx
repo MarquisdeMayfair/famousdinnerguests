@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { SimliClient } from "simli-client";
+import { SimliClient, generateSimliSessionToken, generateIceServers } from "simli-client";
 
 const today = new Date().toLocaleDateString("en-GB", {
   weekday: "long", day: "numeric", month: "long", year: "numeric",
@@ -25,9 +25,11 @@ const EL_KEY    = "sk_0a21fb30b487b7cb7f76d55bf6dc781c6a2c29d8c74f110a";
 const VOICE_ID  = "JBFqnCBsd6RMkjVDRZzb";
 const SIMLI_KEY = "mjd588b2wc94l1bxmpqhh7";
 const FACE_ID   = "2dc24004-2d69-41d1-b9b4-e9cb0b4f2ee3";
-const IMG       = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/Sir_Winston_Churchill_-_19086236948.jpg/800px-Sir_Winston_Churchill_-_19086236948.jpg";
 
-// Convert ElevenLabs MP3 blob → PCM16 Uint8Array at 16 kHz (Simli requirement)
+// Wikimedia Commons direct file URL — avoids hotlink restrictions
+const IMG = "https://upload.wikimedia.org/wikipedia/commons/b/bc/Sir_Winston_Churchill_-_19086236948.jpg";
+
+// Convert ElevenLabs MP3 blob → PCM16 Uint8Array at 16 kHz
 async function blobToPCM16(blob) {
   const arrayBuffer = await blob.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -43,27 +45,27 @@ async function blobToPCM16(blob) {
 }
 
 export default function App() {
-  const [msgs, setMsgs]         = useState([{ role: "assistant", content: GREETING, id: 0 }]);
-  const [input, setInput]       = useState("");
-  const [thinking, setThinking] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
-  const [voiceOn, setVoiceOn]   = useState(true);
-  const [showCfg, setShowCfg]   = useState(false);
-  const [tab, setTab]           = useState("voice");
-  const [wave, setWave]         = useState(Array(20).fill(0.1));
-  const [imgErr, setImgErr]     = useState(false);
-  const [log, setLog]           = useState("Connecting to Simli...");
+  const [msgs, setMsgs]           = useState([{ role: "assistant", content: GREETING, id: 0 }]);
+  const [input, setInput]         = useState("");
+  const [thinking, setThinking]   = useState(false);
+  const [speaking, setSpeaking]   = useState(false);
+  const [voiceOn, setVoiceOn]     = useState(true);
+  const [showCfg, setShowCfg]     = useState(false);
+  const [tab, setTab]             = useState("voice");
+  const [wave, setWave]           = useState(Array(20).fill(0.1));
+  const [imgErr, setImgErr]       = useState(false);
+  const [log, setLog]             = useState("Connecting to Simli...");
   const [simliReady, setSimliReady] = useState(false);
   const [simliError, setSimliError] = useState(false);
   const [videoActive, setVideoActive] = useState(false);
 
-  const audioEl   = useRef(null);
+  const audioEl    = useRef(null);
   const simliAudio = useRef(null);
-  const videoEl   = useRef(null);
-  const endRef    = useRef(null);
-  const waveInt   = useRef(null);
-  const idRef     = useRef(1);
-  const client    = useRef(null);
+  const videoEl    = useRef(null);
+  const endRef     = useRef(null);
+  const waveInt    = useRef(null);
+  const idRef      = useRef(1);
+  const clientRef  = useRef(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
 
@@ -78,40 +80,58 @@ export default function App() {
     return () => clearInterval(waveInt.current);
   }, [speaking]);
 
-  // ── Init Simli on mount ──────────────────────────────────────────────────
+  // ── Init Simli with correct API: token + ICE servers first ──────────────
   useEffect(() => {
     let cancelled = false;
     async function initSimli() {
       try {
-        setLog("Starting Simli WebRTC...");
-        const simli = new SimliClient();
-        simli.Initialize({
-          apiKey:            SIMLI_KEY,
-          faceID:            FACE_ID,
-          handleSilence:     true,
-          maxSessionLength:  3600,
-          maxIdleTime:       300,
-          videoRef:          videoEl.current,
-          audioRef:          simliAudio.current,
-          enableConsoleLogs: false,
+        setLog("Fetching Simli session token...");
+        
+        // Step 1: Get session token
+        const tokenData = await generateSimliSessionToken({
+          apiKey: SIMLI_KEY,
+          config: {
+            faceId:           FACE_ID,
+            handleSilence:    true,
+            maxSessionLength: 3600,
+            maxIdleTime:      300,
+          }
         });
+        if (cancelled) return;
+        setLog("Fetching ICE servers...");
+
+        // Step 2: Get ICE servers
+        const iceServers = await generateIceServers(SIMLI_KEY);
+        if (cancelled) return;
+        setLog("Starting WebRTC connection...");
+
+        // Step 3: Create client with token + ICE servers (new API)
+        const simli = new SimliClient(
+          tokenData.session_token,
+          videoEl.current,
+          simliAudio.current,
+          iceServers,
+        );
+
+        // Step 4: Start connection
         await simli.start();
         if (cancelled) return;
-        client.current = simli;
+
+        clientRef.current = simli;
         setSimliReady(true);
         setLog("Lip sync ready ✓");
       } catch (err) {
-        console.error("Simli error:", err);
+        console.error("Simli init error:", err);
         if (!cancelled) {
           setSimliError(true);
-          setLog("Lip sync unavailable — voice only");
+          setLog("Voice only — " + String(err).slice(0, 60));
         }
       }
     }
     initSimli();
     return () => {
       cancelled = true;
-      try { client.current?.close?.(); } catch (_) {}
+      try { clientRef.current?.close?.(); } catch (_) {}
     };
   }, []);
 
@@ -133,14 +153,13 @@ export default function App() {
       if (!res.ok) throw new Error("ElevenLabs " + res.status);
       const blob = await res.blob();
 
-      if (client.current && simliReady) {
-        // ── SIMLI PATH ──
+      if (clientRef.current && simliReady) {
         setLog("Lip sync active...");
         const pcm16 = await blobToPCM16(blob);
         setVideoActive(true);
         const CHUNK = 6000;
         for (let i = 0; i < pcm16.length; i += CHUNK) {
-          client.current.sendAudioData(pcm16.slice(i, i + CHUNK));
+          clientRef.current.sendAudioData(pcm16.slice(i, i + CHUNK));
         }
         const durationMs = (pcm16.byteLength / 2 / 16000) * 1000;
         setTimeout(() => {
@@ -149,7 +168,7 @@ export default function App() {
           setLog("Lip sync ready ✓");
         }, durationMs + 800);
       } else {
-        // ── PLAIN AUDIO FALLBACK ──
+        // Plain audio fallback
         setLog("Speaking...");
         const url = URL.createObjectURL(blob);
         audioEl.current.src = url;
@@ -202,7 +221,9 @@ export default function App() {
   }, [input, msgs, thinking, speak]);
 
   const statusDot = thinking ? "thinking" : speaking ? "speaking" : simliError ? "err" : "idle";
-  const statusTxt = thinking ? "Composing..." : speaking ? (videoActive ? "Speaking · Lip sync active" : "Speaking...") : simliError ? "Voice only mode" : simliReady ? "At Table · Lip sync ready" : "Connecting...";
+  const statusTxt = thinking ? "Composing reply..." : speaking
+    ? (videoActive ? "Speaking · Lip sync active" : "Speaking...")
+    : simliError ? "Voice only mode" : simliReady ? "At Table · Lip sync ready" : "Connecting...";
 
   return (
     <>
@@ -212,15 +233,11 @@ export default function App() {
         body,#root{height:100vh;background:#0b0806;font-family:'EB Garamond',Georgia,serif;color:#f0e6cc;overflow:hidden}
         .wrap{display:flex;height:100vh;max-width:1060px;margin:0 auto}
         .wrap::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 50%,rgba(150,85,10,.07) 0%,transparent 55%);pointer-events:none}
-
         .left{width:296px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.8rem 1.3rem;border-right:1px solid rgba(160,110,38,.13);position:relative;z-index:1}
         .frame{position:relative;width:210px;height:262px;margin-bottom:.9rem}
         .frame::before{content:'';position:absolute;inset:-7px;border:2px solid #745514;box-shadow:inset 0 0 0 2px rgba(160,110,38,.24),0 0 0 1px rgba(160,110,38,.14),0 4px 18px rgba(0,0,0,.5),0 0 30px rgba(150,85,10,.07);z-index:2;transition:box-shadow .3s}
         .frame.glow::before{animation:fg 1.7s ease-in-out infinite}
-        @keyframes fg{
-          0%,100%{box-shadow:inset 0 0 0 2px rgba(180,140,50,.4),0 0 0 1px rgba(180,140,50,.22),0 4px 18px rgba(0,0,0,.5),0 0 50px rgba(180,120,20,.24)}
-          50%{box-shadow:inset 0 0 0 2px rgba(205,165,65,.6),0 0 0 1px rgba(205,165,65,.38),0 4px 18px rgba(0,0,0,.5),0 0 70px rgba(200,140,28,.38)}
-        }
+        @keyframes fg{0%,100%{box-shadow:inset 0 0 0 2px rgba(180,140,50,.4),0 0 0 1px rgba(180,140,50,.22),0 4px 18px rgba(0,0,0,.5),0 0 50px rgba(180,120,20,.24)}50%{box-shadow:inset 0 0 0 2px rgba(205,165,65,.6),0 0 0 1px rgba(205,165,65,.38),0 4px 18px rgba(0,0,0,.5),0 0 70px rgba(200,140,28,.38)}}
         .portrait{width:100%;height:100%;object-fit:cover;object-position:center top;filter:sepia(14%) contrast(1.04) brightness(.92)}
         .simli-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:3;background:#000}
         .ph{width:100%;height:100%;background:linear-gradient(155deg,#231808,#140b05);display:flex;align-items:center;justify-content:center;font-family:'Playfair Display',serif;font-size:4rem;color:rgba(160,110,38,.32)}
@@ -241,8 +258,7 @@ export default function App() {
         .b{display:inline-flex;align-items:center;gap:.26rem;background:rgba(160,110,38,.05);border:1px solid rgba(160,110,38,.15);border-radius:12px;padding:.15rem .48rem;font-size:.62rem;color:rgba(176,144,46,.48);letter-spacing:.06em;text-transform:uppercase}
         .b.on{border-color:rgba(160,110,38,.38);color:rgba(192,160,60,.78);background:rgba(160,110,38,.1)}
         .bd{width:4px;height:4px;border-radius:50%;background:#a07828}.b.on .bd{background:#c09030;box-shadow:0 0 3px rgba(192,144,40,.45)}
-        .lg{font-size:.6rem;color:rgba(176,144,46,.28);font-style:italic;text-align:center;min-height:.9rem}
-
+        .lg{font-size:.6rem;color:rgba(176,144,46,.28);font-style:italic;text-align:center;min-height:.9rem;padding:0 .5rem}
         .right{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative;z-index:1}
         .hdr{padding:.95rem 1.7rem;border-bottom:1px solid rgba(160,110,38,.11);display:flex;align-items:center;justify-content:space-between}
         .ht{font-family:'Playfair Display',serif;font-size:.86rem;color:rgba(176,144,46,.65);letter-spacing:.12em;text-transform:uppercase;font-weight:400}
@@ -280,8 +296,6 @@ export default function App() {
         .tab{padding:.42rem .88rem;font-size:.71rem;color:rgba(176,144,46,.42);cursor:pointer;border-bottom:2px solid transparent;letter-spacing:.07em;text-transform:uppercase;transition:all .15s;font-family:'EB Garamond',serif}
         .tab.a{color:#c09030;border-bottom-color:#c09030}
         .tc{padding:1.2rem 1.6rem}
-        .lbl{display:block;font-size:.67rem;color:rgba(176,144,46,.58);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.28rem}
-        .inp{width:100%;background:rgba(12,9,4,.92);border:1px solid rgba(160,110,38,.18);border-radius:2px;color:#f0e6cc;font-family:'EB Garamond',serif;font-size:.88rem;padding:.5rem .7rem;outline:none;margin-bottom:.28rem}
         .note{font-size:.67rem;color:rgba(160,125,55,.34);font-style:italic;margin-bottom:.8rem;line-height:1.42}
         .mftr{display:flex;justify-content:flex-end;gap:.6rem;padding:.8rem 1.6rem 1.3rem}
         .cl{background:transparent;border:1px solid rgba(160,110,38,.18);color:rgba(176,144,46,.48);padding:.42rem .92rem;border-radius:2px;cursor:pointer;font-family:'EB Garamond',serif;font-size:.84rem}
@@ -295,23 +309,29 @@ export default function App() {
         .ibox{background:rgba(160,110,38,.04);border:1px solid rgba(160,110,38,.14);border-radius:2px;padding:.78rem .88rem;margin-bottom:.85rem}
         .ibox p{font-size:.76rem;color:rgba(205,175,115,.6);line-height:1.56;margin-bottom:.38rem}
         .ibox p:last-child{margin-bottom:0}
-        .pill{display:inline-flex;align-items:center;gap:.3rem;padding:.18rem .52rem;border-radius:10px;font-size:.62rem;letter-spacing:.06em;text-transform:uppercase}
+        .pill{display:inline-flex;align-items:center;gap:.3rem;padding:.18rem .52rem;border-radius:10px;font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;margin-left:.6rem}
         .pill.live{background:rgba(40,160,70,.1);border:1px solid rgba(40,160,70,.28);color:rgba(60,200,90,.72)}
         .pill.connecting{background:rgba(160,110,38,.1);border:1px solid rgba(160,110,38,.24);color:rgba(176,144,46,.62)}
         .pill.error{background:rgba(160,50,40,.1);border:1px solid rgba(160,50,40,.28);color:rgba(210,90,80,.68)}
         .pdot{width:5px;height:5px;border-radius:50%;background:currentColor;animation:sp 1.5s ease-in-out infinite}
       `}</style>
 
-      <audio ref={audioEl} style={{ display: "none" }} />
-      <audio ref={simliAudio} autoPlay style={{ display: "none" }} />
+      <audio ref={audioEl} style={{ display:"none" }} />
+      <audio ref={simliAudio} autoPlay style={{ display:"none" }} />
 
       <div className="wrap">
-        {/* AVATAR */}
+        {/* ── AVATAR ── */}
         <div className="left">
           <div className={`frame ${speaking ? "glow" : ""} ${videoActive ? "vid-on" : ""}`}>
             {imgErr
               ? <div className="ph">WSC</div>
-              : <img className="portrait" src={IMG} alt="Churchill" onError={() => setImgErr(true)} />}
+              : <img
+                  className="portrait"
+                  src={IMG}
+                  alt="Churchill"
+                  crossOrigin="anonymous"
+                  onError={() => setImgErr(true)}
+                />}
             <video
               ref={videoEl}
               className="simli-video"
@@ -324,8 +344,8 @@ export default function App() {
           <div className="wave">
             {Array(20).fill(0).map((_, i) => (
               <div key={i} className="wb" style={{
-                height: speaking ? `${4 + (wave[i] || .1) * 17}px` : "3px",
-                opacity: speaking ? .45 + (wave[i] || 0) * .55 : .16,
+                height: speaking ? `${4 + (wave[i]||.1) * 17}px` : "3px",
+                opacity: speaking ? .45 + (wave[i]||0) * .55 : .16,
               }} />
             ))}
           </div>
@@ -337,19 +357,19 @@ export default function App() {
             <span className="st">{statusTxt}</span>
           </div>
           <div className="bdgs">
-            <div className="b on"><span className="bd" />Churchill Skill</div>
-            <div className={`b ${voiceOn ? "on" : ""}`}><span className="bd" />Voice {voiceOn ? "On" : "Off"}</div>
-            <div className={`b ${simliReady ? "on" : ""}`}><span className="bd" />Lip Sync {simliReady ? "Live" : simliError ? "Off" : "…"}</div>
+            <div className="b on"><span className="bd"/>Churchill Skill</div>
+            <div className={`b ${voiceOn?"on":""}`}><span className="bd"/>Voice {voiceOn?"On":"Off"}</div>
+            <div className={`b ${simliReady?"on":""}`}><span className="bd"/>Lip Sync {simliReady?"Live":simliError?"Off":"…"}</div>
           </div>
           <div className="lg">{log}</div>
         </div>
 
-        {/* CHAT */}
+        {/* ── CHAT ── */}
         <div className="right">
           <div className="hdr">
             <div className="ht">Famous Dinner Guests · {today}</div>
             <div className="hb">
-              <button className={`btn ${voiceOn ? "on" : ""}`} onClick={() => setVoiceOn(v => !v)}>
+              <button className={`btn ${voiceOn?"on":""}`} onClick={() => setVoiceOn(v=>!v)}>
                 {voiceOn ? "🔊 Voice" : "🔇 Voice"}
               </button>
               <button className="btn" onClick={() => setShowCfg(true)}>⚙ Settings</button>
@@ -359,13 +379,13 @@ export default function App() {
           <div className="msgs">
             {msgs.map(m => (
               <div key={m.id} className={`msg ${m.role}`}>
-                <div className="ml">{m.role === "assistant" ? "Churchill" : "You"}</div>
+                <div className="ml">{m.role==="assistant" ? "Churchill" : "You"}</div>
                 <div className="mb2">{m.content}</div>
               </div>
             ))}
             {thinking && (
               <div className="dots">
-                <div className="dot" /><div className="dot" /><div className="dot" />
+                <div className="dot"/><div className="dot"/><div className="dot"/>
                 <span className="dl">Churchill is composing his thoughts...</span>
               </div>
             )}
@@ -378,16 +398,16 @@ export default function App() {
               placeholder="Ask Churchill anything — the war, cigars, Britain, history..."
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              onKeyDown={e => { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();} }}
               disabled={thinking}
             />
-            <button className="send" onClick={send} disabled={thinking || !input.trim()}>
+            <button className="send" onClick={send} disabled={thinking||!input.trim()}>
               {thinking ? "..." : "Send"}
             </button>
           </div>
         </div>
 
-        {/* SETTINGS */}
+        {/* ── SETTINGS ── */}
         {showCfg && (
           <div className="ov" onClick={() => setShowCfg(false)}>
             <div className="modal" onClick={e => e.stopPropagation()}>
@@ -396,38 +416,36 @@ export default function App() {
                 <div className="ms">famousdinnerguests.com — Sir Winston Churchill</div>
               </div>
               <div className="tabs">
-                {[["voice","🎙 Voice"],["lipsync","🎭 Lip Sync"],["about","ℹ About"]].map(([k,l]) => (
-                  <div key={k} className={`tab ${tab===k?"a":""}`} onClick={() => setTab(k)}>{l}</div>
+                {[["voice","🎙 Voice"],["lipsync","🎭 Lip Sync"],["about","ℹ About"]].map(([k,l])=>(
+                  <div key={k} className={`tab ${tab===k?"a":""}`} onClick={()=>setTab(k)}>{l}</div>
                 ))}
               </div>
               <div className="tc">
-                {tab === "voice" && <>
+                {tab==="voice" && <>
                   <div className="tr">
                     <span className="tl">Enable voice</span>
-                    <input type="checkbox" className="tog" checked={voiceOn} onChange={e => setVoiceOn(e.target.checked)} />
+                    <input type="checkbox" className="tog" checked={voiceOn} onChange={e=>setVoiceOn(e.target.checked)}/>
                   </div>
-                  <label className="lbl">ElevenLabs Voice</label>
-                  <div className="note">Pre-configured with "George" (warm British). Search the ElevenLabs Voice Library for "Winston Churchill" to find a closer match and update VOICE_ID in App.jsx.</div>
+                  <div className="note">ElevenLabs "George" voice pre-configured. Search "Winston Churchill" in ElevenLabs Voice Library for a more authentic match.</div>
                 </>}
-                {tab === "lipsync" && <>
-                  <div style={{ display:"flex", alignItems:"center", gap:".6rem", marginBottom:"1rem" }}>
+                {tab==="lipsync" && <>
+                  <div style={{display:"flex",alignItems:"center",marginBottom:"1rem"}}>
                     <span className="tl">Simli Status</span>
                     <div className={`pill ${simliReady?"live":simliError?"error":"connecting"}`}>
                       <div className="pdot"/>
-                      {simliReady ? "Live" : simliError ? "Error" : "Connecting"}
+                      {simliReady?"Live":simliError?"Error":"Connecting"}
                     </div>
                   </div>
                   <div className="ibox">
-                    <p>Simli WebRTC lip sync initialises automatically on load using your pre-configured API key and Face ID.</p>
-                    <p><strong style={{color:"rgba(192,155,68,.8)"}}>Key:</strong> mjd588b2wc94l1bxmpqhh7</p>
-                    <p><strong style={{color:"rgba(192,155,68,.8)"}}>Face ID:</strong> 2dc24004-2d69-41d1-b9b4-e9cb0b4f2ee3</p>
-                    <p>Audio pipeline: ElevenLabs MP3 → WebAudio PCM16 16kHz → Simli WebRTC → live animated portrait</p>
+                    <p>Simli fetches a session token and ICE servers on load, then opens a WebRTC connection for real-time lip sync.</p>
+                    <p><strong style={{color:"rgba(192,155,68,.8)"}}>Pipeline:</strong> ElevenLabs MP3 → WebAudio PCM16 16kHz → Simli WebRTC → animated portrait overlay</p>
+                    <p><strong style={{color:"rgba(192,155,68,.8)"}}>Log:</strong> {log}</p>
                   </div>
                 </>}
-                {tab === "about" && <>
+                {tab==="about" && <>
                   <div className="ibox">
                     <p><strong style={{color:"rgba(192,155,68,.8)"}}>Churchill Skill</strong> constrains the LLM to pre-1965 knowledge, his personality, speech patterns, and era. He never breaks character.</p>
-                    <p>Each new guest = a new Skill. Napoleon, Cleopatra, Einstein — same stack, different character constraints.</p>
+                    <p>Each new guest = a new Skill file. Napoleon, Cleopatra, Einstein — same infrastructure, different constraints.</p>
                   </div>
                   <div className="note" style={{marginBottom:0}}>
                     <strong style={{color:"rgba(192,155,68,.56)"}}>famousdinnerguests.com</strong> — "Famous" spans all of history. Timeless brand.
@@ -435,8 +453,8 @@ export default function App() {
                 </>}
               </div>
               <div className="mftr">
-                <button className="cl" onClick={() => setShowCfg(false)}>Close</button>
-                <button className="sv" onClick={() => setShowCfg(false)}>Done</button>
+                <button className="cl" onClick={()=>setShowCfg(false)}>Close</button>
+                <button className="sv" onClick={()=>setShowCfg(false)}>Done</button>
               </div>
             </div>
           </div>
