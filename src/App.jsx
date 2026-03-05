@@ -24,7 +24,7 @@ Pray — what shall we talk about? I find that the best dinner conversations beg
 const EL_KEY    = "sk_0a21fb30b487b7cb7f76d55bf6dc781c6a2c29d8c74f110a";
 const VOICE_ID  = "JBFqnCBsd6RMkjVDRZzb";
 const SIMLI_KEY = "mjd588b2wc94l1bxmpqhh7";
-const FACE_ID   = "2dc24004-2d69-41d1-b9b4-e9cb0b4f2ee3";
+const FACE_ID   = "fbd6098b-e350-4efa-aa9f-c8222e0d5108";
 
 // Wikimedia Commons direct file URL — avoids hotlink restrictions
 const IMG = "https://upload.wikimedia.org/wikipedia/commons/b/bc/Sir_Winston_Churchill_-_19086236948.jpg";
