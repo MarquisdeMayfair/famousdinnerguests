@@ -72,6 +72,19 @@ export default function App() {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
 
+  // Warm up audio on first user interaction so browsers allow playback
+  useEffect(() => {
+    const warmup = () => {
+      const a = audioEl.current;
+      if (a) { a.muted = true; a.play().then(() => { a.pause(); a.muted = false; a.currentTime = 0; }).catch(() => {}); }
+      document.removeEventListener("click", warmup);
+      document.removeEventListener("keydown", warmup);
+    };
+    document.addEventListener("click", warmup, { once: true });
+    document.addEventListener("keydown", warmup, { once: true });
+    return () => { document.removeEventListener("click", warmup); document.removeEventListener("keydown", warmup); };
+  }, []);
+
   useEffect(() => {
     if (speaking) {
       waveInt.current = setInterval(() =>
@@ -151,27 +164,33 @@ export default function App() {
       });
       if (!res.ok) throw new Error("TTS " + res.status);
       const blob = await res.blob();
-      const arrayBuf = await blob.arrayBuffer();
 
-      // Decode to AudioContext and play directly (bypasses autoplay restrictions)
-      const actx = new (window.AudioContext || window.webkitAudioContext)();
-      const audioBuf = await actx.decodeAudioData(arrayBuf.slice(0));
-      const source = actx.createBufferSource();
-      source.buffer = audioBuf;
-      source.connect(actx.destination);
-      source.onended = () => {
-        setSpeaking(false);
-        setVideoActive(false);
-        setLog(simliReady ? "Lip sync ready ✓" : "Ready");
-        actx.close();
-      };
-      source.start(0);
-      setLog(simliReady ? "Lip sync active..." : "Speaking...");
+      // Play via <audio> element — most reliable cross-browser
+      const url = URL.createObjectURL(blob);
+      const audio = audioEl.current;
+      audio.src = url;
+      audio.volume = 1.0;
+      audio.onended = () => { setSpeaking(false); setVideoActive(false); setLog("Ready"); URL.revokeObjectURL(url); };
+      audio.onerror = (e) => { console.error("Audio play error:", e); setSpeaking(false); setLog("Audio error"); };
+
+      // Resume AudioContext if browser suspended it
+      if (audio.audioContext?.state === "suspended") await audio.audioContext.resume();
+
+      const playPromise = audio.play();
+      if (playPromise) {
+        playPromise.catch((e) => {
+          console.error("Play rejected:", e);
+          setSpeaking(false);
+          setLog("Audio blocked — interact with page first");
+        });
+      }
+      setLog("Speaking...");
 
       // Also send to Simli for lip sync if connected
       if (clientRef.current && simliReady) {
         setVideoActive(true);
-        const pcm16 = await blobToPCM16(new Blob([arrayBuf]));
+        setLog("Lip sync active...");
+        const pcm16 = await blobToPCM16(blob);
         const CHUNK = 6000;
         for (let i = 0; i < pcm16.length; i += CHUNK) {
           clientRef.current.sendAudioData(pcm16.slice(i, i + CHUNK));
@@ -392,6 +411,7 @@ export default function App() {
             <video
               ref={videoEl}
               className="simli-video"
+              style={{ display: simliError ? "none" : "block" }}
               autoPlay
               playsInline
             />
